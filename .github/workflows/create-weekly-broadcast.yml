@@ -7,6 +7,16 @@ on:
 
   workflow_dispatch:
     inputs:
+      profile:
+        description: Broadcast profile to process
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - sunday-service
+          - test-stream
+
       target_date:
         description: >
           Broadcast date in YYYY-MM-DD. Leave empty to use the next Sunday.
@@ -64,12 +74,14 @@ jobs:
 
           SHORT_IO_API_KEY: ${{ secrets.SHORT_IO_API_KEY }}
           SHORT_IO_LINK_ID: ${{ secrets.SHORT_IO_LINK_ID }}
+          SHORT_IO_TEST_LINK_ID: ${{ secrets.SHORT_IO_TEST_LINK_ID }}
 
           YOUTUBE_TIME_ZONE: ${{ vars.YOUTUBE_TIME_ZONE }}
           YOUTUBE_START_TIME: ${{ vars.YOUTUBE_START_TIME }}
+          YOUTUBE_TEST_START_TIME: ${{ vars.YOUTUBE_TEST_START_TIME }}
           YOUTUBE_PLAYLIST_ID: ${{ vars.YOUTUBE_PLAYLIST_ID }}
 
-          YOUTUBE_BROADCAST_CONFIG: config/youtube-broadcast.json
+          YOUTUBE_BROADCAST_CONFIG: config/youtube-broadcasts.json
 
           TARGET_DATE: >-
             ${{ github.event_name == 'workflow_dispatch'
@@ -85,6 +97,11 @@ jobs:
             ${{ github.event_name == 'workflow_dispatch'
                 && inputs.update_shortio
                 || github.event_name != 'workflow_dispatch' }}
+
+          SELECTED_PROFILE: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.profile
+                || 'all' }}
 
         run: node scripts/create-weekly-broadcast.mjs
 

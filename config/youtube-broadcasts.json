@@ -1,0 +1,67 @@
+{
+  "broadcasts": [
+    {
+      "id": "sunday-service",
+      "enabled": true,
+      "durationMinutes": 120,
+      "title": "Ibadah Minggu GIII Tokyo, {{date}}",
+      "descriptionTemplate": "templates/sunday-description.txt",
+      "startTimeVariable": "YOUTUBE_START_TIME",
+      "streamIdVariable": "YOUTUBE_STREAM_ID",
+      "shortIoLinkIdVariable": "SHORT_IO_LINK_ID",
+      "privacyStatus": "unlisted",
+      "madeForKids": false,
+      "playlist": {
+        "enabled": true
+      },
+      "contentDetails": {
+        "enableAutoStart": false,
+        "enableAutoStop": false,
+        "enableDvr": true,
+        "enableEmbed": true,
+        "recordFromStart": true
+      },
+      "studioSettings": {
+        "slowMode": {
+          "enabled": true,
+          "delaySeconds": 60
+        },
+        "liveReactions": true,
+        "liveChat": "all-features",
+        "aiFeatures": false
+      }
+    },
+    {
+      "id": "test-stream",
+      "enabled": true,
+      "durationMinutes": 30,
+      "title": "GIII Tokyo Test Stream — {{date}}",
+      "descriptionTemplate": "templates/test-description.txt",
+      "startTimeVariable": "YOUTUBE_TEST_START_TIME",
+      "streamIdVariable": "YOUTUBE_STREAM_ID",
+      "shortIoLinkIdVariable": "SHORT_IO_TEST_LINK_ID",
+      "privacyStatus": "unlisted",
+      "madeForKids": false,
+      "playlist": {
+        "enabled": false
+      },
+      "contentDetails": {
+        "enableAutoStart": false,
+        "enableAutoStop": false,
+        "enableDvr": true,
+        "enableEmbed": false,
+        "recordFromStart": false
+      },
+      "studioSettings": {
+        "slowMode": {
+          "enabled": false,
+          "delaySeconds": 0
+        },
+        "liveReactions": true,
+        "liveChat": "all-features",
+        "aiFeatures": false
+      }
+    }
+  ]
+}
+

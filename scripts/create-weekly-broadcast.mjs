@@ -2,264 +2,388 @@ import { appendFile, readFile } from "node:fs/promises";
 import path from "node:path";
 import { google } from "googleapis";
 
-const configPath =
+const CONFIG_PATH =
   process.env.YOUTUBE_BROADCAST_CONFIG ||
-  "config/youtube-broadcast.json";
+  "config/youtube-broadcasts.json";
 
-const fileConfig = await loadBroadcastConfig(configPath);
+const config = await loadJsonFile(CONFIG_PATH);
 
-const runtimeConfig = {
-  timeZone:
-    process.env.YOUTUBE_TIME_ZONE || "Asia/Tokyo",
-
-  startTime:
-    process.env.YOUTUBE_START_TIME || "10:00",
-
-  reusableStreamId:
-    process.env.YOUTUBE_STREAM_ID || "",
-
-  playlistId:
-    process.env.YOUTUBE_PLAYLIST_ID || "",
-
-  shortIoLinkId:
-    process.env.SHORT_IO_LINK_ID || "",
-
-  updateShortIo:
-    parseBoolean(process.env.UPDATE_SHORT_IO, true),
-
-  dryRun:
-    parseBoolean(process.env.DRY_RUN, false),
-
+const runtime = {
+  timeZone: process.env.YOUTUBE_TIME_ZONE || "Asia/Tokyo",
+  playlistId: process.env.YOUTUBE_PLAYLIST_ID?.trim() || "",
+  selectedProfile:
+    process.env.SELECTED_PROFILE?.trim() || "all",
   targetDateInput:
-    process.env.TARGET_DATE || "",
+    process.env.TARGET_DATE?.trim() || "",
+  dryRun: parseBoolean(process.env.DRY_RUN, false),
+  updateShortIo: parseBoolean(
+    process.env.UPDATE_SHORT_IO,
+    true,
+  ),
 };
 
-validateBroadcastConfig(fileConfig);
-validateRuntimeConfig();
-validateEnvironment();
+validateConfig(config);
+validateRuntime(runtime);
+
+const profiles = selectProfiles(
+  config.broadcasts,
+  runtime.selectedProfile,
+);
 
 const targetDate = resolveTargetDate(
-  runtimeConfig.targetDateInput,
-  runtimeConfig.timeZone,
+  runtime.targetDateInput,
+  runtime.timeZone,
 );
 
-const formattedDate = formatDisplayDate(
-  targetDate,
-  runtimeConfig.timeZone,
-);
+const formattedDate = formatDisplayDate(targetDate);
 
-const title = renderTemplateValue(
-  fileConfig.title,
-  formattedDate,
-  "title",
-);
+const youtube = runtime.dryRun
+  ? null
+  : createYouTubeClient();
 
-const description = await renderDescriptionTemplate({
-  templatePath: fileConfig.descriptionTemplate,
-  formattedDate,
-});
+const results = [];
 
-const scheduledStartTime = zonedDateTimeToIso(
-  targetDate,
-  runtimeConfig.startTime,
-  runtimeConfig.timeZone,
-);
-
-const scheduledEndTime = new Date(
-  new Date(scheduledStartTime).getTime() +
-    fileConfig.durationMinutes * 60_000,
-).toISOString();
-
-printConfiguration({
-  targetDate,
-  formattedDate,
-  title,
-  description,
-  scheduledStartTime,
-  scheduledEndTime,
-});
-
-if (runtimeConfig.dryRun) {
-  console.log(
-    "\nDry run complete. No external resources were changed.",
-  );
-
-  await writeGitHubSummary({
-    status: "Dry run",
+for (const profile of profiles) {
+  const result = await processProfile({
+    youtube,
+    profile,
     targetDate,
-    scheduledStartTime,
-    title,
-    broadcastId: "",
-    youtubeUrl: "",
-    duplicateFound: false,
-    playlistUpdated: false,
-    shortIoUpdated: false,
+    formattedDate,
   });
 
-  process.exit(0);
+  results.push(result);
 }
 
-const youtube = createYouTubeClient();
+await writeGitHubOutputs(results);
+await writeGitHubSummary(results);
 
-let broadcast = await findExistingBroadcast(
+console.log("\nAll selected broadcast profiles completed.");
+
+/**
+ * Processes one configured broadcast profile.
+ */
+async function processProfile({
   youtube,
-  scheduledStartTime,
-);
+  profile,
+  targetDate,
+  formattedDate,
+}) {
+  console.log(`\n${"=".repeat(64)}`);
+  console.log(`Processing profile: ${profile.id}`);
+  console.log("=".repeat(64));
 
-const duplicateFound = Boolean(broadcast);
-
-if (broadcast) {
-  console.log(
-    `\nExisting broadcast found: ${broadcast.id} — ${
-      broadcast.snippet?.title || "Untitled"
-    }`,
+  const startTime = readEnvironmentVariable(
+    profile.startTimeVariable,
+    {
+      required: true,
+      description: `${profile.id} start time`,
+    },
   );
-} else {
-  broadcast = await createBroadcast(youtube, {
-    title,
-    description,
+
+  validateTime(startTime, profile.startTimeVariable);
+
+  const streamId = readEnvironmentVariable(
+    profile.streamIdVariable,
+  );
+
+  const shortIoLinkId = readEnvironmentVariable(
+    profile.shortIoLinkIdVariable,
+    {
+      required:
+        runtime.updateShortIo && !runtime.dryRun,
+      description: `${profile.id} Short.io link ID`,
+    },
+  );
+
+  const title = renderTemplate(
+    profile.title,
+    formattedDate,
+    `${profile.id}.title`,
+  );
+
+  const description = await renderDescriptionTemplate({
+    templatePath: profile.descriptionTemplate,
+    formattedDate,
+    profileId: profile.id,
+  });
+
+  const scheduledStartTime = zonedDateTimeToIso(
+    targetDate,
+    startTime,
+    runtime.timeZone,
+  );
+
+  const scheduledEndTime = new Date(
+    new Date(scheduledStartTime).getTime() +
+      profile.durationMinutes * 60_000,
+  ).toISOString();
+
+  printProfileConfiguration({
+    profile,
+    targetDate,
+    formattedDate,
+    startTime,
     scheduledStartTime,
     scheduledEndTime,
-    privacyStatus: fileConfig.privacyStatus,
-    madeForKids: fileConfig.madeForKids,
-    contentDetails: fileConfig.contentDetails,
+    title,
+    description,
+    streamId,
+    shortIoLinkId,
   });
 
-  console.log(`\nCreated broadcast: ${broadcast.id}`);
-}
+  if (runtime.dryRun) {
+    console.log(
+      "\nDry run complete. No YouTube or Short.io resources were changed.",
+    );
 
-if (!broadcast.id) {
-  throw new Error(
-    "YouTube did not return a broadcast ID.",
-  );
-}
+    return {
+      profileId: profile.id,
+      status: "Dry run",
+      targetDate,
+      scheduledStartTime,
+      title,
+      broadcastId: "",
+      youtubeUrl: "",
+      existingBroadcast: false,
+      streamBound: false,
+      playlistProcessed: false,
+      shortIoUpdated: false,
+      studioSettings: profile.studioSettings,
+    };
+  }
 
-if (runtimeConfig.reusableStreamId) {
-  await ensureStreamBinding(
+  let broadcast = await findExistingBroadcast({
     youtube,
-    broadcast,
-    runtimeConfig.reusableStreamId,
-  );
-} else {
-  console.log(
-    "\nYOUTUBE_STREAM_ID is not configured; stream binding skipped.",
-  );
+    profile,
+    expectedStartTime: scheduledStartTime,
+  });
+
+  const existingBroadcast = Boolean(broadcast);
+
+  if (broadcast) {
+    console.log(
+      `\nExisting broadcast found: ${broadcast.id} — ${
+        broadcast.snippet?.title || "Untitled"
+      }`,
+    );
+  } else {
+    broadcast = await createBroadcast({
+      youtube,
+      profile,
+      title,
+      description,
+      scheduledStartTime,
+      scheduledEndTime,
+    });
+
+    console.log(
+      `\nCreated broadcast: ${broadcast.id}`,
+    );
+  }
+
+  if (!broadcast?.id) {
+    throw new Error(
+      `YouTube did not return a broadcast ID for profile ${profile.id}.`,
+    );
+  }
+
+  let streamBound = false;
+
+  if (streamId) {
+    streamBound = await ensureStreamBinding({
+      youtube,
+      broadcast,
+      streamId,
+    });
+  } else {
+    console.log(
+      "\nNo stream ID is configured; stream binding skipped.",
+    );
+  }
+
+  let playlistProcessed = false;
+
+  if (profile.playlist.enabled) {
+    if (!runtime.playlistId) {
+      throw new Error(
+        `YOUTUBE_PLAYLIST_ID is required because playlist ` +
+          `integration is enabled for profile ${profile.id}.`,
+      );
+    }
+
+    await ensureVideoInPlaylist({
+      youtube,
+      playlistId: runtime.playlistId,
+      videoId: broadcast.id,
+    });
+
+    playlistProcessed = true;
+  } else {
+    console.log("\nPlaylist integration disabled.");
+  }
+
+  const youtubeUrl =
+    `https://www.youtube.com/watch?v=${broadcast.id}`;
+
+  let shortIoUpdated = false;
+
+  if (runtime.updateShortIo) {
+    await updateShortIoLink({
+      linkId: shortIoLinkId,
+      destinationUrl: youtubeUrl,
+      profileId: profile.id,
+    });
+
+    shortIoUpdated = true;
+  } else {
+    console.log("\nShort.io update disabled.");
+  }
+
+  console.log(`\nProfile completed: ${profile.id}`);
+  console.log(`YouTube URL: ${youtubeUrl}`);
+
+  return {
+    profileId: profile.id,
+    status: existingBroadcast
+      ? "Existing broadcast reused"
+      : "New broadcast created",
+    targetDate,
+    scheduledStartTime,
+    title: broadcast.snippet?.title || title,
+    broadcastId: broadcast.id,
+    youtubeUrl,
+    existingBroadcast,
+    streamBound,
+    playlistProcessed,
+    shortIoUpdated,
+    studioSettings: profile.studioSettings,
+  };
 }
 
-let playlistUpdated = false;
-
-if (fileConfig.playlist.enabled) {
-  await ensureVideoInPlaylist(
-    youtube,
-    runtimeConfig.playlistId,
-    broadcast.id,
-  );
-
-  playlistUpdated = true;
-}
-
-const youtubeUrl =
-  `https://www.youtube.com/watch?v=${broadcast.id}`;
-
-let shortIoUpdated = false;
-
-if (runtimeConfig.updateShortIo) {
-  await updateShortIoLink(youtubeUrl);
-  shortIoUpdated = true;
-} else {
-  console.log("\nShort.io update disabled.");
-}
-
-console.log("\nCompleted successfully.");
-console.log(`YouTube URL: ${youtubeUrl}`);
-
-await writeGitHubOutputs({
-  broadcastId: broadcast.id,
-  youtubeUrl,
-  targetDate,
-  scheduledStartTime,
-  duplicateFound,
-  playlistUpdated,
-  shortIoUpdated,
-});
-
-await writeGitHubSummary({
-  status: duplicateFound
-    ? "Existing broadcast reused"
-    : "New broadcast created",
-  targetDate,
-  scheduledStartTime,
-  title: broadcast.snippet?.title || title,
-  broadcastId: broadcast.id,
-  youtubeUrl,
-  duplicateFound,
-  playlistUpdated,
-  shortIoUpdated,
-});
-
-async function loadBroadcastConfig(configFilePath) {
+/**
+ * Loads and parses a JSON file relative to the repository root.
+ */
+async function loadJsonFile(filePath) {
   const resolvedPath = path.resolve(
     process.cwd(),
-    configFilePath,
+    filePath,
   );
 
-  let rawConfig;
+  let raw;
 
   try {
-    rawConfig = await readFile(resolvedPath, "utf8");
+    raw = await readFile(resolvedPath, "utf8");
   } catch (error) {
     throw new Error(
-      `Unable to read broadcast config at ${resolvedPath}: ${
-        error instanceof Error
-          ? error.message
-          : String(error)
-      }`,
+      `Unable to read ${resolvedPath}: ${formatError(
+        error,
+      )}`,
     );
   }
 
   try {
-    return JSON.parse(rawConfig);
+    return JSON.parse(raw);
   } catch (error) {
     throw new Error(
-      `Invalid JSON in ${resolvedPath}: ${
-        error instanceof Error
-          ? error.message
-          : String(error)
-      }`,
+      `Invalid JSON in ${resolvedPath}: ${formatError(
+        error,
+      )}`,
     );
   }
 }
 
-function validateBroadcastConfig(config) {
+/**
+ * Validates the root configuration and every profile.
+ */
+function validateConfig(value) {
   if (
-    !config ||
-    typeof config !== "object" ||
-    Array.isArray(config)
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
   ) {
     throw new Error(
-      "Broadcast configuration must be a JSON object.",
+      "The broadcast configuration must be a JSON object.",
     );
   }
 
   if (
-    !Number.isInteger(config.durationMinutes) ||
-    config.durationMinutes <= 0
+    !Array.isArray(value.broadcasts) ||
+    value.broadcasts.length === 0
   ) {
     throw new Error(
-      "durationMinutes must be a positive integer.",
+      "The configuration must contain a non-empty broadcasts array.",
     );
   }
 
-  requireNonEmptyString(config.title, "title");
+  const profileIds = new Set();
+
+  for (const profile of value.broadcasts) {
+    validateProfile(profile);
+
+    if (profileIds.has(profile.id)) {
+      throw new Error(
+        `Duplicate broadcast profile ID: ${profile.id}`,
+      );
+    }
+
+    profileIds.add(profile.id);
+  }
+}
+
+/**
+ * Validates one broadcast profile.
+ */
+function validateProfile(profile) {
+  if (
+    !profile ||
+    typeof profile !== "object" ||
+    Array.isArray(profile)
+  ) {
+    throw new Error(
+      "Each broadcast profile must be a JSON object.",
+    );
+  }
+
+  requireNonEmptyString(profile.id, "profile.id");
+
+  if (typeof profile.enabled !== "boolean") {
+    throw new Error(
+      `${profile.id}.enabled must be true or false.`,
+    );
+  }
+
+  if (
+    !Number.isInteger(profile.durationMinutes) ||
+    profile.durationMinutes <= 0
+  ) {
+    throw new Error(
+      `${profile.id}.durationMinutes must be a positive integer.`,
+    );
+  }
 
   requireNonEmptyString(
-    config.descriptionTemplate,
-    "descriptionTemplate",
+    profile.title,
+    `${profile.id}.title`,
   );
 
   requireNonEmptyString(
-    config.privacyStatus,
-    "privacyStatus",
+    profile.descriptionTemplate,
+    `${profile.id}.descriptionTemplate`,
+  );
+
+  requireNonEmptyString(
+    profile.startTimeVariable,
+    `${profile.id}.startTimeVariable`,
+  );
+
+  validateOptionalString(
+    profile.streamIdVariable,
+    `${profile.id}.streamIdVariable`,
+  );
+
+  requireNonEmptyString(
+    profile.shortIoLinkIdVariable,
+    `${profile.id}.shortIoLinkIdVariable`,
   );
 
   const validPrivacyStatuses = new Set([
@@ -269,46 +393,69 @@ function validateBroadcastConfig(config) {
   ]);
 
   if (
-    !validPrivacyStatuses.has(config.privacyStatus)
+    !validPrivacyStatuses.has(
+      profile.privacyStatus,
+    )
   ) {
     throw new Error(
-      "privacyStatus must be private, unlisted, or public.",
+      `${profile.id}.privacyStatus must be ` +
+        "private, unlisted, or public.",
     );
   }
 
-  if (typeof config.madeForKids !== "boolean") {
+  if (typeof profile.madeForKids !== "boolean") {
     throw new Error(
-      "madeForKids must be true or false.",
+      `${profile.id}.madeForKids must be true or false.`,
     );
   }
 
   if (
-    !config.playlist ||
-    typeof config.playlist !== "object" ||
-    Array.isArray(config.playlist)
+    !profile.playlist ||
+    typeof profile.playlist !== "object" ||
+    Array.isArray(profile.playlist)
   ) {
     throw new Error(
-      "playlist must be a JSON object.",
+      `${profile.id}.playlist must be an object.`,
     );
   }
 
-  if (typeof config.playlist.enabled !== "boolean") {
+  if (typeof profile.playlist.enabled !== "boolean") {
     throw new Error(
-      "playlist.enabled must be true or false.",
+      `${profile.id}.playlist.enabled must be boolean.`,
     );
   }
 
+  validateContentDetails(
+    profile.contentDetails,
+    profile.id,
+  );
+
+  validateStudioSettings(
+    profile.studioSettings,
+    profile.id,
+  );
+
+  validateSupportedPlaceholders(
+    profile.title,
+    `${profile.id}.title`,
+  );
+}
+
+function validateContentDetails(
+  contentDetails,
+  profileId,
+) {
   if (
-    !config.contentDetails ||
-    typeof config.contentDetails !== "object" ||
-    Array.isArray(config.contentDetails)
+    !contentDetails ||
+    typeof contentDetails !== "object" ||
+    Array.isArray(contentDetails)
   ) {
     throw new Error(
-      "contentDetails must be a JSON object.",
+      `${profileId}.contentDetails must be an object.`,
     );
   }
 
-  const contentDetailBooleanFields = [
+  const booleanFields = [
     "enableAutoStart",
     "enableAutoStop",
     "enableDvr",
@@ -316,270 +463,228 @@ function validateBroadcastConfig(config) {
     "recordFromStart",
   ];
 
-  for (const field of contentDetailBooleanFields) {
-    if (
-      typeof config.contentDetails[field] !==
-      "boolean"
-    ) {
+  for (const field of booleanFields) {
+    if (typeof contentDetails[field] !== "boolean") {
       throw new Error(
-        `contentDetails.${field} must be true or false.`,
+        `${profileId}.contentDetails.${field} ` +
+          "must be true or false.",
       );
     }
   }
-
-  if (
-    !config.studioSettings ||
-    typeof config.studioSettings !== "object" ||
-    Array.isArray(config.studioSettings)
-  ) {
-    throw new Error(
-      "studioSettings must be a JSON object.",
-    );
-  }
-
-  if (
-    !config.studioSettings.slowMode ||
-    typeof config.studioSettings.slowMode !==
-      "object"
-  ) {
-    throw new Error(
-      "studioSettings.slowMode must be an object.",
-    );
-  }
-
-  if (
-    typeof config.studioSettings.slowMode.enabled !==
-    "boolean"
-  ) {
-    throw new Error(
-      "studioSettings.slowMode.enabled must be boolean.",
-    );
-  }
-
-  if (
-    !Number.isInteger(
-      config.studioSettings.slowMode.delaySeconds,
-    ) ||
-    config.studioSettings.slowMode.delaySeconds < 0
-  ) {
-    throw new Error(
-      "studioSettings.slowMode.delaySeconds must be a non-negative integer.",
-    );
-  }
-
-  if (
-    typeof config.studioSettings.liveReactions !==
-    "boolean"
-  ) {
-    throw new Error(
-      "studioSettings.liveReactions must be boolean.",
-    );
-  }
-
-  requireNonEmptyString(
-    config.studioSettings.liveChat,
-    "studioSettings.liveChat",
-  );
-
-  if (
-    typeof config.studioSettings.aiFeatures !==
-    "boolean"
-  ) {
-    throw new Error(
-      "studioSettings.aiFeatures must be boolean.",
-    );
-  }
-
-  validateSupportedPlaceholders(
-    config.title,
-    "title",
-  );
 }
 
-function validateRuntimeConfig() {
+function validateStudioSettings(
+  studioSettings,
+  profileId,
+) {
+  if (
+    !studioSettings ||
+    typeof studioSettings !== "object" ||
+    Array.isArray(studioSettings)
+  ) {
+    throw new Error(
+      `${profileId}.studioSettings must be an object.`,
+    );
+  }
+
+  const slowMode = studioSettings.slowMode;
+
+  if (
+    !slowMode ||
+    typeof slowMode !== "object" ||
+    Array.isArray(slowMode)
+  ) {
+    throw new Error(
+      `${profileId}.studioSettings.slowMode ` +
+        "must be an object.",
+    );
+  }
+
+  if (typeof slowMode.enabled !== "boolean") {
+    throw new Error(
+      `${profileId}.studioSettings.slowMode.enabled ` +
+        "must be boolean.",
+    );
+  }
+
+  if (
+    !Number.isInteger(slowMode.delaySeconds) ||
+    slowMode.delaySeconds < 0
+  ) {
+    throw new Error(
+      `${profileId}.studioSettings.slowMode.delaySeconds ` +
+        "must be a non-negative integer.",
+    );
+  }
+
+  if (
+    typeof studioSettings.liveReactions !==
+    "boolean"
+  ) {
+    throw new Error(
+      `${profileId}.studioSettings.liveReactions ` +
+        "must be boolean.",
+    );
+  }
+
   requireNonEmptyString(
-    runtimeConfig.timeZone,
+    studioSettings.liveChat,
+    `${profileId}.studioSettings.liveChat`,
+  );
+
+  if (
+    typeof studioSettings.aiFeatures !==
+    "boolean"
+  ) {
+    throw new Error(
+      `${profileId}.studioSettings.aiFeatures ` +
+        "must be boolean.",
+    );
+  }
+}
+
+/**
+ * Validates runtime selection and timezone.
+ */
+function validateRuntime(value) {
+  requireNonEmptyString(
+    value.timeZone,
     "YOUTUBE_TIME_ZONE",
   );
 
   requireNonEmptyString(
-    runtimeConfig.startTime,
-    "YOUTUBE_START_TIME",
+    value.selectedProfile,
+    "SELECTED_PROFILE",
   );
-
-  if (
-    !/^\d{2}:\d{2}$/.test(runtimeConfig.startTime)
-  ) {
-    throw new Error(
-      "YOUTUBE_START_TIME must use HH:mm format.",
-    );
-  }
-
-  const [hour, minute] =
-    runtimeConfig.startTime.split(":").map(Number);
-
-  if (
-    hour < 0 ||
-    hour > 23 ||
-    minute < 0 ||
-    minute > 59
-  ) {
-    throw new Error(
-      `Invalid YOUTUBE_START_TIME: ${runtimeConfig.startTime}`,
-    );
-  }
 
   try {
     new Intl.DateTimeFormat("en-US", {
-      timeZone: runtimeConfig.timeZone,
+      timeZone: value.timeZone,
     }).format(new Date());
   } catch {
     throw new Error(
-      `Invalid YOUTUBE_TIME_ZONE: ${runtimeConfig.timeZone}`,
+      `Invalid YOUTUBE_TIME_ZONE: ${value.timeZone}`,
     );
   }
 
   if (
-    fileConfig.playlist.enabled &&
-    !runtimeConfig.playlistId
+    !value.dryRun &&
+    !process.env.GOOGLE_CLIENT_ID?.trim()
   ) {
     throw new Error(
-      "YOUTUBE_PLAYLIST_ID is required when playlist.enabled is true.",
-    );
-  }
-}
-
-function validateEnvironment() {
-  if (runtimeConfig.dryRun) {
-    return;
-  }
-
-  const required = [
-    "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET",
-    "GOOGLE_REFRESH_TOKEN",
-  ];
-
-  if (runtimeConfig.updateShortIo) {
-    required.push(
-      "SHORT_IO_API_KEY",
-      "SHORT_IO_LINK_ID",
+      "GOOGLE_CLIENT_ID is required.",
     );
   }
 
-  const missing = required.filter(
-    (name) => !process.env[name]?.trim(),
-  );
-
-  if (missing.length > 0) {
-    throw new Error(
-      `Missing required environment variables: ${missing.join(", ")}`,
-    );
-  }
-}
-
-function requireNonEmptyString(value, fieldName) {
   if (
-    typeof value !== "string" ||
-    value.trim() === ""
+    !value.dryRun &&
+    !process.env.GOOGLE_CLIENT_SECRET?.trim()
   ) {
     throw new Error(
-      `${fieldName} must be a non-empty string.`,
+      "GOOGLE_CLIENT_SECRET is required.",
     );
   }
-}
 
-function validateSupportedPlaceholders(
-  template,
-  templateName,
-) {
-  const placeholders = [
-    ...template.matchAll(/\{\{([^{}]+)\}\}/g),
-  ].map((match) => match[1].trim());
-
-  const unsupported = placeholders.filter(
-    (placeholder) => placeholder !== "date",
-  );
-
-  if (unsupported.length > 0) {
+  if (
+    !value.dryRun &&
+    !process.env.GOOGLE_REFRESH_TOKEN?.trim()
+  ) {
     throw new Error(
-      `Unsupported placeholders in ${templateName}: ${[
-        ...new Set(unsupported),
-      ].join(", ")}. Only {{date}} is supported.`,
+      "GOOGLE_REFRESH_TOKEN is required.",
     );
   }
-}
 
-function renderTemplateValue(
-  template,
-  formattedDate,
-  templateName,
-) {
-  validateSupportedPlaceholders(
-    template,
-    templateName,
-  );
-
-  return template
-    .replaceAll("{{date}}", formattedDate)
-    .trim();
-}
-
-async function renderDescriptionTemplate({
-  templatePath,
-  formattedDate,
-}) {
-  const resolvedPath = path.resolve(
-    process.cwd(),
-    templatePath,
-  );
-
-  let template;
-
-  try {
-    template = await readFile(resolvedPath, "utf8");
-  } catch (error) {
+  if (
+    !value.dryRun &&
+    value.updateShortIo &&
+    !process.env.SHORT_IO_API_KEY?.trim()
+  ) {
     throw new Error(
-      `Unable to read description template at ${resolvedPath}: ${
-        error instanceof Error
-          ? error.message
-          : String(error)
-      }`,
+      "SHORT_IO_API_KEY is required when Short.io updates are enabled.",
+    );
+  }
+}
+
+/**
+ * For "all", only enabled profiles run.
+ *
+ * When a specific profile ID is selected manually, that profile
+ * may run even if enabled is false. This allows test profiles to
+ * remain disabled for weekly scheduled runs.
+ */
+function selectProfiles(
+  configuredProfiles,
+  selectedProfile,
+) {
+  if (selectedProfile === "all") {
+    const enabledProfiles =
+      configuredProfiles.filter(
+        (profile) => profile.enabled,
+      );
+
+    if (enabledProfiles.length === 0) {
+      throw new Error(
+        "No broadcast profiles are enabled.",
+      );
+    }
+
+    return enabledProfiles;
+  }
+
+  const selected = configuredProfiles.find(
+    (profile) => profile.id === selectedProfile,
+  );
+
+  if (!selected) {
+    const available = configuredProfiles
+      .map((profile) => profile.id)
+      .join(", ");
+
+    throw new Error(
+      `Unknown profile "${selectedProfile}". ` +
+        `Available profiles: ${available}`,
     );
   }
 
-  validateSupportedPlaceholders(
-    template,
-    "description template",
-  );
-
-  return template
-    .replaceAll("{{date}}", formattedDate)
-    .trim();
+  return [selected];
 }
 
+/**
+ * Authenticates with YouTube using the stored refresh token.
+ */
 function createYouTubeClient() {
-  const oauth2Client = new google.auth.OAuth2(
+  const auth = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
   );
 
-  oauth2Client.setCredentials({
+  auth.setCredentials({
     refresh_token:
       process.env.GOOGLE_REFRESH_TOKEN,
   });
 
   return google.youtube({
     version: "v3",
-    auth: oauth2Client,
+    auth,
   });
 }
 
-async function findExistingBroadcast(
+/**
+ * Finds an upcoming broadcast matching both:
+ *
+ * - the exact scheduled timestamp
+ * - the static title prefix before {{date}}
+ */
+async function findExistingBroadcast({
   youtube,
+  profile,
   expectedStartTime,
-) {
+}) {
   let pageToken;
+
+  const titlePrefix = getTitlePrefix(
+    profile.title,
+  );
 
   do {
     const response =
@@ -596,20 +701,28 @@ async function findExistingBroadcast(
         pageToken,
       });
 
-    const broadcasts = response.data.items || [];
-
-    const match = broadcasts.find((item) => {
+    const match = (
+      response.data.items || []
+    ).find((item) => {
       const existingStart =
         item.snippet?.scheduledStartTime;
+
+      const existingTitle =
+        item.snippet?.title || "";
 
       if (!existingStart) {
         return false;
       }
 
-      return (
+      const sameTime =
         new Date(existingStart).getTime() ===
-        new Date(expectedStartTime).getTime()
-      );
+        new Date(expectedStartTime).getTime();
+
+      const sameProfile =
+        titlePrefix === "" ||
+        existingTitle.startsWith(titlePrefix);
+
+      return sameTime && sameProfile;
     });
 
     if (match) {
@@ -622,18 +735,30 @@ async function findExistingBroadcast(
   return null;
 }
 
-async function createBroadcast(
+function getTitlePrefix(titleTemplate) {
+  const placeholderIndex =
+    titleTemplate.indexOf("{{date}}");
+
+  if (placeholderIndex < 0) {
+    return titleTemplate.trim();
+  }
+
+  return titleTemplate
+    .slice(0, placeholderIndex)
+    .trim();
+}
+
+/**
+ * Creates a scheduled broadcast.
+ */
+async function createBroadcast({
   youtube,
-  {
-    title,
-    description,
-    scheduledStartTime,
-    scheduledEndTime,
-    privacyStatus,
-    madeForKids,
-    contentDetails,
-  },
-) {
+  profile,
+  title,
+  description,
+  scheduledStartTime,
+  scheduledEndTime,
+}) {
   console.log("\nCreating YouTube broadcast...");
 
   const response =
@@ -652,27 +777,36 @@ async function createBroadcast(
           scheduledEndTime,
         },
         status: {
-          privacyStatus,
-          selfDeclaredMadeForKids: madeForKids,
+          privacyStatus:
+            profile.privacyStatus,
+          selfDeclaredMadeForKids:
+            profile.madeForKids,
         },
-        contentDetails,
+        contentDetails: {
+          ...profile.contentDetails,
+        },
       },
     });
 
   if (!response.data.id) {
     throw new Error(
-      "YouTube created no usable broadcast or returned no ID.",
+      `YouTube returned no broadcast ID for ${profile.id}.`,
     );
   }
 
   return response.data;
 }
 
-async function ensureStreamBinding(
+/**
+ * Binds the broadcast to its configured reusable stream.
+ *
+ * Returns true when the broadcast is or becomes bound.
+ */
+async function ensureStreamBinding({
   youtube,
   broadcast,
   streamId,
-) {
+}) {
   if (
     broadcast.contentDetails?.boundStreamId ===
     streamId
@@ -680,12 +814,24 @@ async function ensureStreamBinding(
     console.log(
       `\nBroadcast is already bound to stream ${streamId}.`,
     );
-    return;
+
+    return true;
   }
 
-  console.log(
-    `\nBinding broadcast to reusable stream ${streamId}...`,
-  );
+  if (
+    broadcast.contentDetails?.boundStreamId &&
+    broadcast.contentDetails.boundStreamId !==
+      streamId
+  ) {
+    console.log(
+      "\nBroadcast is currently bound to another stream. " +
+        `Rebinding to ${streamId}...`,
+    );
+  } else {
+    console.log(
+      `\nBinding broadcast to stream ${streamId}...`,
+    );
+  }
 
   await youtube.liveBroadcasts.bind({
     part: [
@@ -699,25 +845,31 @@ async function ensureStreamBinding(
   });
 
   console.log(
-    "Broadcast successfully bound to reusable stream.",
+    "Broadcast successfully bound to stream.",
   );
+
+  return true;
 }
 
-async function ensureVideoInPlaylist(
+/**
+ * Adds the broadcast to the configured playlist without duplicates.
+ */
+async function ensureVideoInPlaylist({
   youtube,
   playlistId,
   videoId,
-) {
-  const alreadyPresent = await isVideoInPlaylist(
+}) {
+  const exists = await isVideoInPlaylist({
     youtube,
     playlistId,
     videoId,
-  );
+  });
 
-  if (alreadyPresent) {
+  if (exists) {
     console.log(
       `\nVideo ${videoId} is already in playlist ${playlistId}.`,
     );
+
     return;
   }
 
@@ -739,15 +891,15 @@ async function ensureVideoInPlaylist(
   });
 
   console.log(
-    "Broadcast added to the configured playlist.",
+    "Broadcast added to playlist.",
   );
 }
 
-async function isVideoInPlaylist(
+async function isVideoInPlaylist({
   youtube,
   playlistId,
   videoId,
-) {
+}) {
   let pageToken;
 
   do {
@@ -778,20 +930,21 @@ async function isVideoInPlaylist(
   return false;
 }
 
-async function updateShortIoLink(youtubeUrl) {
-  if (!runtimeConfig.shortIoLinkId) {
-    throw new Error(
-      "SHORT_IO_LINK_ID is required when UPDATE_SHORT_IO is true.",
-    );
-  }
-
+/**
+ * Updates one Short.io link to the generated YouTube URL.
+ */
+async function updateShortIoLink({
+  linkId,
+  destinationUrl,
+  profileId,
+}) {
   console.log(
-    `\nUpdating Short.io destination to ${youtubeUrl}...`,
+    `\nUpdating Short.io for ${profileId} to ${destinationUrl}...`,
   );
 
   const response = await fetch(
     `https://api.short.io/links/${encodeURIComponent(
-      runtimeConfig.shortIoLinkId,
+      linkId,
     )}`,
     {
       method: "POST",
@@ -801,7 +954,7 @@ async function updateShortIoLink(youtubeUrl) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        originalURL: youtubeUrl,
+        originalURL: destinationUrl,
       }),
     },
   );
@@ -810,7 +963,8 @@ async function updateShortIoLink(youtubeUrl) {
 
   if (!response.ok) {
     throw new Error(
-      `Short.io update failed with HTTP ${response.status}: ${responseText}`,
+      `Short.io update failed for profile ${profileId} ` +
+        `with HTTP ${response.status}: ${responseText}`,
     );
   }
 
@@ -819,55 +973,145 @@ async function updateShortIoLink(youtubeUrl) {
   );
 }
 
+/**
+ * Reads the environment variable named by a profile field.
+ */
+function readEnvironmentVariable(
+  variableName,
+  {
+    required = false,
+    description = variableName,
+  } = {},
+) {
+  if (
+    typeof variableName !== "string" ||
+    variableName.trim() === ""
+  ) {
+    if (required) {
+      throw new Error(
+        `An environment variable name is required for ${description}.`,
+      );
+    }
+
+    return "";
+  }
+
+  const value =
+    process.env[variableName]?.trim() || "";
+
+  if (required && !value) {
+    throw new Error(
+      `${variableName} is required for ${description}.`,
+    );
+  }
+
+  return value;
+}
+
+/**
+ * Loads and renders a description template.
+ */
+async function renderDescriptionTemplate({
+  templatePath,
+  formattedDate,
+  profileId,
+}) {
+  const resolvedPath = path.resolve(
+    process.cwd(),
+    templatePath,
+  );
+
+  let template;
+
+  try {
+    template = await readFile(
+      resolvedPath,
+      "utf8",
+    );
+  } catch (error) {
+    throw new Error(
+      `Unable to read the description template for ` +
+        `${profileId} at ${resolvedPath}: ${formatError(
+          error,
+        )}`,
+    );
+  }
+
+  return renderTemplate(
+    template,
+    formattedDate,
+    `${profileId}.descriptionTemplate`,
+  );
+}
+
+/**
+ * Supports only the {{date}} placeholder.
+ */
+function renderTemplate(
+  template,
+  formattedDate,
+  templateName,
+) {
+  validateSupportedPlaceholders(
+    template,
+    templateName,
+  );
+
+  return template
+    .replaceAll("{{date}}", formattedDate)
+    .trim();
+}
+
+function validateSupportedPlaceholders(
+  template,
+  templateName,
+) {
+  const placeholders = [
+    ...template.matchAll(/\{\{([^{}]+)\}\}/g),
+  ].map((match) => match[1].trim());
+
+  const unsupported = placeholders.filter(
+    (placeholder) => placeholder !== "date",
+  );
+
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Unsupported placeholders in ${templateName}: ` +
+        `${[...new Set(unsupported)].join(", ")}. ` +
+        "Only {{date}} is supported.",
+    );
+  }
+}
+
+/**
+ * Uses an explicit target date or calculates the next Sunday.
+ *
+ * Running on Sunday without TARGET_DATE selects the following Sunday.
+ */
 function resolveTargetDate(input, timeZone) {
   if (input) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) {
-      throw new Error(
-        `TARGET_DATE must use YYYY-MM-DD format; received "${input}".`,
-      );
-    }
-
-    const [year, month, day] =
-      input.split("-").map(Number);
-
-    const validationDate = new Date(
-      Date.UTC(year, month - 1, day),
-    );
-
-    if (
-      validationDate.getUTCFullYear() !== year ||
-      validationDate.getUTCMonth() !==
-        month - 1 ||
-      validationDate.getUTCDate() !== day
-    ) {
-      throw new Error(
-        `TARGET_DATE is not a valid date: ${input}`,
-      );
-    }
-
+    validateIsoDate(input);
     return input;
   }
 
-  const todayParts = getDatePartsInTimeZone(
+  const today = getDatePartsInTimeZone(
     new Date(),
     timeZone,
   );
 
-  const todayUtc = new Date(
+  const localDateAsUtc = new Date(
     Date.UTC(
-      todayParts.year,
-      todayParts.month - 1,
-      todayParts.day,
+      today.year,
+      today.month - 1,
+      today.day,
     ),
   );
 
-  // Always select the next Sunday.
-  // When run on Sunday, this chooses Sunday one week later.
   const daysUntilSunday =
-    7 - todayUtc.getUTCDay();
+    7 - localDateAsUtc.getUTCDay();
 
   const target = new Date(
-    todayUtc.getTime() +
+    localDateAsUtc.getTime() +
       daysUntilSunday * 86_400_000,
   );
 
@@ -883,11 +1127,41 @@ function resolveTargetDate(input, timeZone) {
   ].join("-");
 }
 
+function validateIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error(
+      `TARGET_DATE must use YYYY-MM-DD format; received "${value}".`,
+    );
+  }
+
+  const [year, month, day] =
+    value.split("-").map(Number);
+
+  const candidate = new Date(
+    Date.UTC(year, month - 1, day),
+  );
+
+  if (
+    candidate.getUTCFullYear() !== year ||
+    candidate.getUTCMonth() !== month - 1 ||
+    candidate.getUTCDate() !== day
+  ) {
+    throw new Error(
+      `TARGET_DATE is not valid: ${value}`,
+    );
+  }
+}
+
+/**
+ * Converts a local date/time in an IANA timezone to UTC ISO.
+ */
 function zonedDateTimeToIso(
   date,
   time,
   timeZone,
 ) {
+  validateTime(time, "start time");
+
   const [year, month, day] =
     date.split("-").map(Number);
 
@@ -906,24 +1180,24 @@ function zonedDateTimeToIso(
 
   for (
     let attempt = 0;
-    attempt < 3;
+    attempt < 4;
     attempt += 1
   ) {
-    const parts =
+    const represented =
       getDateTimePartsInTimeZone(
         candidate,
         timeZone,
       );
 
-    const representedAsUtc = Date.UTC(
-      parts.year,
-      parts.month - 1,
-      parts.day,
-      parts.hour,
-      parts.minute,
+    const representedUtc = Date.UTC(
+      represented.year,
+      represented.month - 1,
+      represented.day,
+      represented.hour,
+      represented.minute,
     );
 
-    const desiredAsUtc = Date.UTC(
+    const desiredUtc = Date.UTC(
       year,
       month - 1,
       day,
@@ -932,7 +1206,7 @@ function zonedDateTimeToIso(
     );
 
     const difference =
-      desiredAsUtc - representedAsUtc;
+      desiredUtc - representedUtc;
 
     if (difference === 0) {
       break;
@@ -943,18 +1217,18 @@ function zonedDateTimeToIso(
     );
   }
 
-  const finalParts =
+  const finalValue =
     getDateTimePartsInTimeZone(
       candidate,
       timeZone,
     );
 
   const exact =
-    finalParts.year === year &&
-    finalParts.month === month &&
-    finalParts.day === day &&
-    finalParts.hour === hour &&
-    finalParts.minute === minute;
+    finalValue.year === year &&
+    finalValue.month === month &&
+    finalValue.day === day &&
+    finalValue.hour === hour &&
+    finalValue.minute === minute;
 
   if (!exact) {
     throw new Error(
@@ -963,6 +1237,28 @@ function zonedDateTimeToIso(
   }
 
   return candidate.toISOString();
+}
+
+function validateTime(value, fieldName) {
+  if (!/^\d{2}:\d{2}$/.test(value)) {
+    throw new Error(
+      `${fieldName} must use HH:mm format; received "${value}".`,
+    );
+  }
+
+  const [hour, minute] =
+    value.split(":").map(Number);
+
+  if (
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    throw new Error(
+      `Invalid ${fieldName}: ${value}`,
+    );
+  }
 }
 
 function getDatePartsInTimeZone(
@@ -1015,18 +1311,19 @@ function partsToObject(parts) {
   );
 }
 
-function formatDisplayDate(date, timeZone) {
+/**
+ * Formats {{date}} as Indonesian dd LLLL yyyy.
+ */
+function formatDisplayDate(date) {
   const [year, month, day] =
     date.split("-").map(Number);
 
-  // Noon UTC avoids accidental date-boundary changes
-  // when the value is formatted.
   const stableDate = new Date(
     Date.UTC(year, month - 1, day, 12),
   );
 
   return new Intl.DateTimeFormat("id-ID", {
-    timeZone,
+    timeZone: "UTC",
     day: "2-digit",
     month: "long",
     year: "numeric",
@@ -1036,6 +1333,7 @@ function formatDisplayDate(date, timeZone) {
 function parseBoolean(value, defaultValue) {
   if (
     value === undefined ||
+    value === null ||
     value === ""
   ) {
     return defaultValue;
@@ -1066,59 +1364,103 @@ function parseBoolean(value, defaultValue) {
   );
 }
 
-function printConfiguration({
+function requireNonEmptyString(
+  value,
+  fieldName,
+) {
+  if (
+    typeof value !== "string" ||
+    value.trim() === ""
+  ) {
+    throw new Error(
+      `${fieldName} must be a non-empty string.`,
+    );
+  }
+}
+
+function validateOptionalString(
+  value,
+  fieldName,
+) {
+  if (
+    value !== undefined &&
+    (typeof value !== "string" ||
+      value.trim() === "")
+  ) {
+    throw new Error(
+      `${fieldName} must be omitted or a non-empty string.`,
+    );
+  }
+}
+
+function formatError(error) {
+  return error instanceof Error
+    ? error.message
+    : String(error);
+}
+
+function printProfileConfiguration({
+  profile,
   targetDate,
   formattedDate,
-  title,
-  description,
+  startTime,
   scheduledStartTime,
   scheduledEndTime,
+  title,
+  description,
+  streamId,
+  shortIoLinkId,
 }) {
-  console.log("Configuration:");
-  console.log(`  Config file:       ${configPath}`);
+  console.log("\nConfiguration:");
+  console.log(`  Profile:           ${profile.id}`);
+  console.log(`  Config file:       ${CONFIG_PATH}`);
   console.log(`  Target date:       ${targetDate}`);
   console.log(`  Display date:      ${formattedDate}`);
-  console.log(`  Time zone:         ${runtimeConfig.timeZone}`);
-  console.log(`  Start time:        ${runtimeConfig.startTime}`);
+  console.log(`  Time zone:         ${runtime.timeZone}`);
+  console.log(`  Start time:        ${startTime}`);
   console.log(`  Scheduled start:   ${scheduledStartTime}`);
   console.log(`  Scheduled end:     ${scheduledEndTime}`);
+  console.log(`  Duration:          ${profile.durationMinutes} minutes`);
   console.log(`  Title:             ${title}`);
-  console.log(`  Privacy:           ${fileConfig.privacyStatus}`);
-  console.log(`  Made for kids:     ${fileConfig.madeForKids}`);
+  console.log(`  Privacy:           ${profile.privacyStatus}`);
+  console.log(`  Made for kids:     ${profile.madeForKids}`);
   console.log(
-    `  Auto start:        ${fileConfig.contentDetails.enableAutoStart}`,
-  );
-  console.log(
-    `  Auto stop:         ${fileConfig.contentDetails.enableAutoStop}`,
-  );
-  console.log(
-    `  DVR:               ${fileConfig.contentDetails.enableDvr}`,
-  );
-  console.log(
-    `  Embed:             ${fileConfig.contentDetails.enableEmbed}`,
-  );
-  console.log(
-    `  Record from start: ${fileConfig.contentDetails.recordFromStart}`,
+    `  Stream binding:    ${
+      streamId ? "configured" : "not configured"
+    }`,
   );
   console.log(
     `  Playlist:          ${
-      fileConfig.playlist.enabled
-        ? runtimeConfig.playlistId
+      profile.playlist.enabled
+        ? runtime.playlistId
         : "disabled"
     }`,
   );
   console.log(
-    `  Dry run:           ${runtimeConfig.dryRun}`,
-  );
-  console.log(
-    `  Update Short.io:   ${runtimeConfig.updateShortIo}`,
-  );
-  console.log(
-    `  Reusable stream:   ${
-      runtimeConfig.reusableStreamId
-        ? "configured"
-        : "not configured"
+    `  Short.io link:     ${
+      shortIoLinkId ? "configured" : "not configured"
     }`,
+  );
+  console.log(`  Dry run:           ${runtime.dryRun}`);
+  console.log(
+    `  Update Short.io:   ${runtime.updateShortIo}`,
+  );
+
+  console.log("\nYouTube API content settings:");
+  console.log(
+    `  Auto start:        ${profile.contentDetails.enableAutoStart}`,
+  );
+  console.log(
+    `  Auto stop:         ${profile.contentDetails.enableAutoStop}`,
+  );
+  console.log(
+    `  DVR:               ${profile.contentDetails.enableDvr}`,
+  );
+  console.log(
+    `  Embed:             ${profile.contentDetails.enableEmbed}`,
+  );
+  console.log(
+    `  Record from start: ${profile.contentDetails.recordFromStart}`,
   );
 
   console.log("\nRendered description:");
@@ -1131,40 +1473,71 @@ function printConfiguration({
   );
   console.log(
     `  Slow mode:         ${
-      fileConfig.studioSettings.slowMode.enabled
-        ? `${fileConfig.studioSettings.slowMode.delaySeconds}s`
+      profile.studioSettings.slowMode.enabled
+        ? `${profile.studioSettings.slowMode.delaySeconds}s`
         : "disabled"
     }`,
   );
   console.log(
     `  Live reactions:    ${
-      fileConfig.studioSettings.liveReactions
+      profile.studioSettings.liveReactions
         ? "enabled"
         : "disabled"
     }`,
   );
   console.log(
-    `  Live chat:         ${fileConfig.studioSettings.liveChat}`,
+    `  Live chat:         ${profile.studioSettings.liveChat}`,
   );
   console.log(
     `  AI features:       ${
-      fileConfig.studioSettings.aiFeatures
+      profile.studioSettings.aiFeatures
         ? "enabled"
         : "disabled"
     }`,
   );
 }
 
-async function writeGitHubOutputs(values) {
+/**
+ * Writes compact outputs. For multiple profiles, values are JSON.
+ */
+async function writeGitHubOutputs(results) {
   if (!process.env.GITHUB_OUTPUT) {
     return;
   }
 
-  const lines = Object.entries(values)
-    .map(
-      ([key, value]) =>
-        `${key}=${String(value)}`,
-    )
+  const outputs = {
+    result_count: results.length,
+    results_json: JSON.stringify(results),
+  };
+
+  if (results.length === 1) {
+    const result = results[0];
+
+    outputs.profile_id = result.profileId;
+    outputs.broadcast_id = result.broadcastId;
+    outputs.youtube_url = result.youtubeUrl;
+    outputs.target_date = result.targetDate;
+    outputs.scheduled_start =
+      result.scheduledStartTime;
+  }
+
+  const lines = Object.entries(outputs)
+    .map(([key, value]) => {
+      const stringValue = String(value);
+
+      if (stringValue.includes("\n")) {
+        const delimiter =
+          `EOF_${Date.now()}_${key}`;
+
+        return [
+          `${key}<<${delimiter}`,
+          stringValue,
+          delimiter,
+        ].join("\n");
+      }
+
+      return `${key}=${stringValue}`;
+    })
     .join("\n");
 
   await appendFile(
@@ -1173,93 +1546,77 @@ async function writeGitHubOutputs(values) {
   );
 }
 
-async function writeGitHubSummary({
-  status,
-  targetDate,
-  scheduledStartTime,
-  title,
-  broadcastId,
-  youtubeUrl,
-  duplicateFound,
-  playlistUpdated,
-  shortIoUpdated,
-}) {
+/**
+ * Creates one GitHub Actions summary section per profile.
+ */
+async function writeGitHubSummary(results) {
   if (!process.env.GITHUB_STEP_SUMMARY) {
     return;
   }
 
-  const rows = [
-    ["Result", status],
-    ["Target date", targetDate],
-    ["Scheduled start", scheduledStartTime],
-    ["Title", title],
-    [
-      "Broadcast ID",
-      broadcastId || "Not created",
-    ],
-    [
-      "YouTube URL",
-      youtubeUrl
-        ? `[Open broadcast](${youtubeUrl})`
-        : "Not created",
-    ],
-    [
-      "Existing broadcast found",
-      String(duplicateFound),
-    ],
-    [
-      "Playlist processed",
-      String(playlistUpdated),
-    ],
-    [
-      "Short.io updated",
-      String(shortIoUpdated),
-    ],
+  const sections = [
+    "# Weekly YouTube Broadcast Automation",
+    "",
   ];
 
-  const summary = [
-    "## Weekly YouTube Broadcast",
-    "",
-    "| Field | Value |",
-    "|---|---|",
-    ...rows.map(
-      ([key, value]) =>
-        `| ${escapeMarkdown(key)} | ${escapeMarkdown(value)} |`,
-    ),
-    "",
-    "## Manual YouTube Studio verification",
-    "",
-    "These settings are recorded in the repository but are not sent through the documented API:",
-    "",
-    `- Slow mode: ${
-      fileConfig.studioSettings.slowMode.enabled
-        ? `${fileConfig.studioSettings.slowMode.delaySeconds} seconds`
-        : "Disabled"
-    }`,
-    `- Live reactions: ${
-      fileConfig.studioSettings.liveReactions
-        ? "Enabled"
-        : "Disabled"
-    }`,
-    `- Live chat: ${fileConfig.studioSettings.liveChat}`,
-    `- AI features: ${
-      fileConfig.studioSettings.aiFeatures
-        ? "Enabled"
-        : "Disabled"
-    }`,
-    "",
-  ].join("\n");
+  for (const result of results) {
+    sections.push(
+      `## ${escapeMarkdown(result.profileId)}`,
+      "",
+      "| Field | Value |",
+      "|---|---|",
+      `| Result | ${escapeMarkdown(result.status)} |`,
+      `| Target date | ${escapeMarkdown(result.targetDate)} |`,
+      `| Scheduled start | ${escapeMarkdown(
+        result.scheduledStartTime,
+      )} |`,
+      `| Title | ${escapeMarkdown(result.title)} |`,
+      `| Broadcast ID | ${escapeMarkdown(
+        result.broadcastId || "Not created",
+      )} |`,
+      `| YouTube URL | ${
+        result.youtubeUrl
+          ? `[Open broadcast](${result.youtubeUrl})`
+          : "Not created"
+      } |`,
+      `| Existing broadcast reused | ${result.existingBroadcast} |`,
+      `| Stream bound | ${result.streamBound} |`,
+      `| Playlist processed | ${result.playlistProcessed} |`,
+      `| Short.io updated | ${result.shortIoUpdated} |`,
+      "",
+      "### Manual YouTube Studio verification",
+      "",
+      `- Slow mode: ${
+        result.studioSettings.slowMode.enabled
+          ? `${result.studioSettings.slowMode.delaySeconds} seconds`
+          : "Disabled"
+      }`,
+      `- Live reactions: ${
+        result.studioSettings.liveReactions
+          ? "Enabled"
+          : "Disabled"
+      }`,
+      `- Live chat: ${escapeMarkdown(
+        result.studioSettings.liveChat,
+      )}`,
+      `- AI features: ${
+        result.studioSettings.aiFeatures
+          ? "Enabled"
+          : "Disabled"
+      }`,
+      "",
+    );
+  }
 
   await appendFile(
     process.env.GITHUB_STEP_SUMMARY,
-    summary,
+    sections.join("\n"),
   );
 }
 
 function escapeMarkdown(value) {
-  return String(value).replaceAll(
-    "|",
-    "\\|",
-  );
+  return String(value)
+    .replaceAll("|", "\\|")
+    .replaceAll("\n", "<br>");
 }
 
