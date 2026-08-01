@@ -1,9 +1,9 @@
 name: Create weekly YouTube broadcast
 
 on:
-  # Every Monday at 01:00 UTC, equivalent to 10:00 JST.
+  # Every Friday at 01:00 UTC, equivalent to 10:00 JST.
   schedule:
-    - cron: "0 1 * * 1"
+    - cron: "0 1 * * 5"
 
   workflow_dispatch:
     inputs:
