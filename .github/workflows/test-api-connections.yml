@@ -1,0 +1,117 @@
+name: Test API connections
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-connections:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          SHORT_IO_API_KEY: ${{ secrets.SHORT_IO_API_KEY }}
+          SHORT_IO_LINK_ID: ${{ secrets.SHORT_IO_LINK_ID }}
+        run: |
+          set -euo pipefail
+
+          for name in \
+            GOOGLE_CLIENT_ID \
+            GOOGLE_CLIENT_SECRET \
+            GOOGLE_REFRESH_TOKEN \
+            SHORT_IO_API_KEY \
+            SHORT_IO_LINK_ID
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::$name is missing"
+              exit 1
+            fi
+          done
+
+      - name: Obtain Google access token
+        id: google-token
+        shell: bash
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE="$(
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --url "https://oauth2.googleapis.com/token" \
+              --header "Content-Type: application/x-www-form-urlencoded" \
+              --data-urlencode "client_id=${GOOGLE_CLIENT_ID}" \
+              --data-urlencode "client_secret=${GOOGLE_CLIENT_SECRET}" \
+              --data-urlencode "refresh_token=${GOOGLE_REFRESH_TOKEN}" \
+              --data-urlencode "grant_type=refresh_token"
+          )"
+
+          ACCESS_TOKEN="$(jq -r '.access_token // empty' <<< "$RESPONSE")"
+
+          if [[ -z "$ACCESS_TOKEN" ]]; then
+            echo "::error::Google did not return an access token"
+            jq 'del(.access_token, .refresh_token, .id_token)' <<< "$RESPONSE"
+            exit 1
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Verify authorized YouTube channel
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ steps.google-token.outputs.access_token }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE="$(
+            curl --fail-with-body --silent --show-error \
+              --url "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true" \
+              --header "Authorization: Bearer ${ACCESS_TOKEN}"
+          )"
+
+          CHANNEL_COUNT="$(jq '.items | length' <<< "$RESPONSE")"
+
+          if [[ "$CHANNEL_COUNT" -eq 0 ]]; then
+            echo "::error::No authorized YouTube channel was returned"
+            exit 1
+          fi
+
+          jq -r '.items[] | "Authorized channel: \(.snippet.title) [\(.id)]"' \
+            <<< "$RESPONSE"
+
+      - name: Verify Short.io credentials
+        shell: bash
+        env:
+          SHORT_IO_API_KEY: ${{ secrets.SHORT_IO_API_KEY }}
+          SHORT_IO_LINK_ID: ${{ secrets.SHORT_IO_LINK_ID }}
+        run: |
+          set -euo pipefail
+
+          # This sends the current link ID without changing its destination.
+          # A later production workflow will use POST to update originalURL.
+          HTTP_STATUS="$(
+            curl --silent \
+              --output /tmp/shortio-response.json \
+              --write-out "%{http_code}" \
+              --url "https://api.short.io/links/${SHORT_IO_LINK_ID}" \
+              --header "Authorization: ${SHORT_IO_API_KEY}"
+          )"
+
+          if [[ "$HTTP_STATUS" -lt 200 || "$HTTP_STATUS" -ge 300 ]]; then
+            echo "::error::Short.io request failed with HTTP ${HTTP_STATUS}"
+            cat /tmp/shortio-response.json
+            exit 1
+          fi
+
+          echo "Short.io credentials and link ID are valid."
