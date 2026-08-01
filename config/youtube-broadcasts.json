@@ -50,7 +50,7 @@
         "enableAutoStop": false,
         "enableDvr": true,
         "enableEmbed": false,
-        "recordFromStart": false
+        "recordFromStart": true
       },
       "studioSettings": {
         "slowMode": {
