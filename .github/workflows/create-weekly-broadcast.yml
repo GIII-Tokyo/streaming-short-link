@@ -1,0 +1,90 @@
+name: Create weekly YouTube broadcast
+
+on:
+  # Every Monday at 01:00 UTC, equivalent to 10:00 JST.
+  schedule:
+    - cron: "0 1 * * 1"
+
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: >
+          Broadcast date in YYYY-MM-DD. Leave empty to use the next Sunday.
+        required: false
+        type: string
+
+      dry_run:
+        description: >
+          Render and validate without changing YouTube or Short.io.
+        required: true
+        default: true
+        type: boolean
+
+      update_shortio:
+        description: >
+          Update Short.io after finding or creating the broadcast.
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: weekly-youtube-broadcast
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  create-broadcast:
+    name: Create broadcast and update link
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create or find weekly broadcast
+        id: create
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+          YOUTUBE_STREAM_ID: ${{ secrets.YOUTUBE_STREAM_ID }}
+
+          SHORT_IO_API_KEY: ${{ secrets.SHORT_IO_API_KEY }}
+          SHORT_IO_LINK_ID: ${{ secrets.SHORT_IO_LINK_ID }}
+
+          YOUTUBE_TIME_ZONE: ${{ vars.YOUTUBE_TIME_ZONE }}
+          YOUTUBE_START_TIME: ${{ vars.YOUTUBE_START_TIME }}
+          YOUTUBE_PLAYLIST_ID: ${{ vars.YOUTUBE_PLAYLIST_ID }}
+
+          YOUTUBE_BROADCAST_CONFIG: config/youtube-broadcast.json
+
+          TARGET_DATE: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.target_date
+                || '' }}
+
+          DRY_RUN: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.dry_run
+                || false }}
+
+          UPDATE_SHORT_IO: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.update_shortio
+                || github.event_name != 'workflow_dispatch' }}
+
+        run: node scripts/create-weekly-broadcast.mjs
+

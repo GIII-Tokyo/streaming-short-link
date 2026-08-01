@@ -1,0 +1,12 @@
+{
+  "name": "streaming-short-link",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "create-broadcast": "node scripts/create-weekly-broadcast.mjs"
+  },
+  "dependencies": {
+    "googleapis": "^159.0.0"
+  }
+}
+
