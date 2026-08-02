@@ -20,6 +20,7 @@ const runtime = {
     process.env.UPDATE_SHORT_IO,
     true,
   ),
+  mode: process.env.PROCESS_MODE?.trim() || "full",
 };
 
 validateConfig(config);
@@ -52,6 +53,19 @@ for (const profile of profiles) {
   });
 
   results.push(result);
+}
+
+const validModes = new Set([
+  "full",
+  "create-only",
+  "shortio-only",
+]);
+
+if (!validModes.has(runtime.mode)) {
+  throw new Error(
+    `PROCESS_MODE must be full, create-only, or shortio-only; ` +
+      `received "${runtime.mode}".`,
+  );
 }
 
 await writeGitHubOutputs(results);
@@ -162,9 +176,13 @@ async function processProfile({
 
   if (broadcast) {
     console.log(
-      `\nExisting broadcast found: ${broadcast.id} — ${
-        broadcast.snippet?.title || "Untitled"
-      }`,
+      `\nExisting broadcast found for profile ${profile.id}.`,
+    );
+  } else if (runtime.mode === "shortio-only") {
+    throw new Error(
+      `No existing upcoming broadcast was found for profile ` +
+        `${profile.id} at ${scheduledStartTime}. ` +
+        `The shortio-only mode will not create a broadcast.`,
     );
   } else {
     broadcast = await createBroadcast({
@@ -177,7 +195,7 @@ async function processProfile({
     });
 
     console.log(
-      `\nCreated broadcast: ${broadcast.id}`,
+      `\nCreated a new broadcast for profile ${profile.id}.`,
     );
   }
 
@@ -189,21 +207,26 @@ async function processProfile({
 
   let streamBound = false;
 
-  if (streamId) {
-    streamBound = await ensureStreamBinding({
-      youtube,
-      broadcast,
-      streamId,
-    });
-  } else {
-    console.log(
-      "\nNo stream ID is configured; stream binding skipped.",
-    );
+  if (runtime.mode !== "shortio-only") {
+    if (streamId) {
+      streamBound = await ensureStreamBinding({
+        youtube,
+        broadcast,
+        streamId,
+      });
+    } else {
+      console.log(
+        "\nNo stream ID is configured; stream binding skipped.",
+      );
+    }
   }
 
   let playlistProcessed = false;
 
-  if (profile.playlist.enabled) {
+  if (
+    runtime.mode !== "shortio-only" &&
+    profile.playlist.enabled
+  ) {
     if (!runtime.playlistId) {
       throw new Error(
         `YOUTUBE_PLAYLIST_ID is required because playlist ` +
@@ -227,7 +250,14 @@ async function processProfile({
 
   let shortIoUpdated = false;
 
-  if (runtime.updateShortIo) {
+  const shouldUpdateShortIo =
+    runtime.mode === "shortio-only" ||
+    (
+      runtime.mode === "full" &&
+      runtime.updateShortIo
+    );
+
+  if (shouldUpdateShortIo) {
     await updateShortIoLink({
       linkId: shortIoLinkId,
       destinationUrl: youtubeUrl,
@@ -236,11 +266,10 @@ async function processProfile({
 
     shortIoUpdated = true;
   } else {
-    console.log("\nShort.io update disabled.");
+    console.log("\nShort.io update skipped.");
   }
 
   console.log(`\nProfile completed: ${profile.id}`);
-  console.log(`YouTube URL: ${youtubeUrl}`);
 
   return {
     profileId: profile.id,
@@ -250,8 +279,11 @@ async function processProfile({
     targetDate,
     scheduledStartTime,
     title: broadcast.snippet?.title || title,
+
+    // Used internally only. Do not print or write to summaries.
     broadcastId: broadcast.id,
     youtubeUrl,
+
     existingBroadcast,
     streamBound,
     playlistProcessed,
@@ -1507,37 +1539,13 @@ async function writeGitHubOutputs(results) {
 
   const outputs = {
     result_count: results.length,
-    results_json: JSON.stringify(results),
+    processed_profiles: results
+      .map((result) => result.profileId)
+      .join(","),
   };
 
-  if (results.length === 1) {
-    const result = results[0];
-
-    outputs.profile_id = result.profileId;
-    outputs.broadcast_id = result.broadcastId;
-    outputs.youtube_url = result.youtubeUrl;
-    outputs.target_date = result.targetDate;
-    outputs.scheduled_start =
-      result.scheduledStartTime;
-  }
-
   const lines = Object.entries(outputs)
-    .map(([key, value]) => {
-      const stringValue = String(value);
-
-      if (stringValue.includes("\n")) {
-        const delimiter =
-          `EOF_${Date.now()}_${key}`;
-
-        return [
-          `${key}<<${delimiter}`,
-          stringValue,
-          delimiter,
-        ].join("\n");
-      }
-
-      return `${key}=${stringValue}`;
-    })
+    .map(([key, value]) => `${key}=${String(value)}`)
     .join("\n");
 
   await appendFile(
@@ -1571,15 +1579,8 @@ async function writeGitHubSummary(results) {
         result.scheduledStartTime,
       )} |`,
       `| Title | ${escapeMarkdown(result.title)} |`,
-      `| Broadcast ID | ${escapeMarkdown(
-        result.broadcastId || "Not created",
-      )} |`,
-      `| YouTube URL | ${
-        result.youtubeUrl
-          ? `[Open broadcast](${result.youtubeUrl})`
-          : "Not created"
-      } |`,
       `| Existing broadcast reused | ${result.existingBroadcast} |`,
+      `| Broadcast resolved | ${Boolean(result.broadcastId)} |`,
       `| Stream bound | ${result.streamBound} |`,
       `| Playlist processed | ${result.playlistProcessed} |`,
       `| Short.io updated | ${result.shortIoUpdated} |`,

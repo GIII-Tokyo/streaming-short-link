@@ -1,9 +1,9 @@
-name: Create weekly YouTube broadcast
+name: Update weekly Short.io links
 
 on:
-  # Monday 10:00 JST
+  # Saturday 21:00 JST
   schedule:
-    - cron: "0 1 * * 1"
+    - cron: "0 12 * * 6"
 
   workflow_dispatch:
     inputs:
@@ -24,20 +24,20 @@ on:
         type: string
 
       dry_run:
-        description: Validate without changing YouTube
+        description: Validate without updating Short.io
         required: true
         default: true
         type: boolean
 
 concurrency:
-  group: weekly-youtube-create
+  group: weekly-shortio-update
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  create:
+  update-links:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -51,21 +51,23 @@ jobs:
 
       - run: npm ci
 
-      - name: Create placeholder broadcasts
+      - name: Find broadcasts and update Short.io
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+          SHORT_IO_API_KEY: ${{ secrets.SHORT_IO_API_KEY }}
+          SHORT_IO_LINK_ID: ${{ secrets.SHORT_IO_LINK_ID }}
+          SHORT_IO_TEST_LINK_ID: ${{ secrets.SHORT_IO_TEST_LINK_ID }}
 
           YOUTUBE_TIME_ZONE: ${{ vars.YOUTUBE_TIME_ZONE }}
           YOUTUBE_PLAYLIST_ID: ${{ vars.YOUTUBE_PLAYLIST_ID }}
           YOUTUBE_START_TIME: ${{ vars.YOUTUBE_START_TIME }}
           YOUTUBE_TEST_START_TIME: ${{ vars.YOUTUBE_TEST_START_TIME }}
 
-          YOUTUBE_STREAM_ID: ${{ secrets.YOUTUBE_STREAM_ID }}
-
           YOUTUBE_BROADCAST_CONFIG: config/youtube-broadcasts.json
-          PROCESS_MODE: create-only
+          PROCESS_MODE: shortio-only
 
           SELECTED_PROFILE: >-
             ${{ github.event_name == 'workflow_dispatch'
@@ -82,7 +84,7 @@ jobs:
                 && inputs.dry_run
                 || false }}
 
-          UPDATE_SHORT_IO: "false"
+          UPDATE_SHORT_IO: "true"
 
         run: node scripts/create-weekly-broadcast.mjs
 
