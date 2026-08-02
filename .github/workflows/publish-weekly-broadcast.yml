@@ -1,4 +1,4 @@
-name: Update weekly Short.io links
+name: Publish weekly YouTube broadcast
 
 on:
   # Saturday 21:00 JST
@@ -67,7 +67,7 @@ jobs:
           YOUTUBE_TEST_START_TIME: ${{ vars.YOUTUBE_TEST_START_TIME }}
 
           YOUTUBE_BROADCAST_CONFIG: config/youtube-broadcasts.json
-          PROCESS_MODE: shortio-only
+          PROCESS_MODE: publish
 
           SELECTED_PROFILE: >-
             ${{ github.event_name == 'workflow_dispatch'
@@ -83,8 +83,6 @@ jobs:
             ${{ github.event_name == 'workflow_dispatch'
                 && inputs.dry_run
                 || false }}
-
-          UPDATE_SHORT_IO: "true"
 
         run: node scripts/create-weekly-broadcast.mjs
 

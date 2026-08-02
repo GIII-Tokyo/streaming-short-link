@@ -82,7 +82,5 @@ jobs:
                 && inputs.dry_run
                 || false }}
 
-          UPDATE_SHORT_IO: "false"
-
         run: node scripts/create-weekly-broadcast.mjs
 
