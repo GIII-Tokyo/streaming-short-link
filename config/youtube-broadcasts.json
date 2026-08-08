@@ -9,7 +9,7 @@
       "startTimeVariable": "YOUTUBE_START_TIME",
       "streamIdVariable": "YOUTUBE_STREAM_ID",
       "shortIoLinkIdVariable": "SHORT_IO_LINK_ID",
-      "privacyStatus": "unlisted",
+      "privacyStatus": "public",
       "madeForKids": false,
       "playlist": {
         "enabled": true

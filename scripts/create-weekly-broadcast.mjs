@@ -177,7 +177,7 @@ async function processProfile({
       existingBroadcast: false,
       streamProcessed: false,
       playlistProcessed: false,
-      published: false,
+      targetPrivacyStatus: profile.privacyStatus,
       shortIoUpdated: false,
       previousBroadcastDemoted: false,
       studioSettings:
@@ -312,7 +312,7 @@ async function processCreateOnly({
     existingBroadcast,
     streamProcessed,
     playlistProcessed: false,
-    published: false,
+    targetPrivacyStatus: "unlisted",
     shortIoUpdated: false,
     previousBroadcastDemoted: false,
     studioSettings:
@@ -384,12 +384,12 @@ async function processPublish({
     );
   }
 
-  // Publish the new broadcast before switching
-  // the public Short.io destination.
+  // Publish the new broadcast to its targeted visibility
+  // before switching the public Short.io destination.
   await setVideoPrivacy({
     youtube,
     videoId: currentBroadcast.id,
-    privacyStatus: "public",
+    privacyStatus: profile.privacyStatus,
   });
 
   const currentUrl =
@@ -453,7 +453,7 @@ async function processPublish({
   }
 
   console.log(
-    "\nPublish processing completed.",
+    `\nPublish processing completed with target visibility: ${profile.privacyStatus}.`,
   );
 
   return {
@@ -469,7 +469,7 @@ async function processPublish({
     existingBroadcast: true,
     streamProcessed: false,
     playlistProcessed,
-    published: true,
+    targetPrivacyStatus: profile.privacyStatus,
     shortIoUpdated: true,
     previousBroadcastDemoted,
     studioSettings:
@@ -2034,7 +2034,7 @@ async function writeGitHubSummary(
       `| Existing broadcast reused | ${result.existingBroadcast} |`,
       `| Stream processed | ${result.streamProcessed} |`,
       `| Playlist processed | ${result.playlistProcessed} |`,
-      `| Published | ${result.published} |`,
+      `| Target visibility | ${escapeMarkdown(result.targetPrivacyStatus)} |`,
       `| Short.io updated | ${result.shortIoUpdated} |`,
       `| Previous broadcast demoted | ${result.previousBroadcastDemoted} |`,
       "",
