@@ -1,9 +1,9 @@
 name: Publish weekly YouTube broadcast
 
 on:
-  # Saturday 21:00 JST
+  # Saturday 18:23 JST
   schedule:
-    - cron: "0 12 * * 6"
+    - cron: "23 9 * * 6"
 
   workflow_dispatch:
     inputs:
