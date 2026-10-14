@@ -1426,13 +1426,12 @@ function resolveTargetDate(
     );
 
   /*
-   * Always select the next Sunday.
-   * If run on Sunday, select the Sunday
-   * one week later.
+   * Select the upcoming Sunday, including today.
+   * A run delayed past midnight on Saturday
+   * must still target that Sunday's broadcast.
    */
   const daysUntilSunday =
-    7 -
-    localDateAsUtc.getUTCDay();
+    (7 - localDateAsUtc.getUTCDay()) % 7;
 
   return addDaysToIsoDate(
     formatUtcDate(

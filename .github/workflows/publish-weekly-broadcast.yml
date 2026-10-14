@@ -1,9 +1,9 @@
 name: Publish weekly YouTube broadcast
 
 on:
-  # Saturday 18:23 JST
+  # Saturday 15:23 JST
   schedule:
-    - cron: "23 9 * * 6"
+    - cron: "23 6 * * 6"
 
   workflow_dispatch:
     inputs:
@@ -19,7 +19,7 @@ on:
 
       target_date:
         description: >
-          Broadcast date in YYYY-MM-DD. Leave empty for next Sunday.
+          Broadcast date in YYYY-MM-DD. Leave empty for the upcoming Sunday (including today).
         required: false
         type: string
 
