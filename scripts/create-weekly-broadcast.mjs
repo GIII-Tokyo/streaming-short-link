@@ -323,7 +323,7 @@ async function processCreateOnly({
 /**
  * Saturday workflow:
  *
- * - find the already-created upcoming broadcast
+ * - find the already-created broadcast in any status
  * - add it to the unlisted archive playlist
  * - make it public
  * - update Short.io
@@ -339,16 +339,17 @@ async function processPublish({
   shortIoLinkId,
 }) {
   const currentBroadcast =
-    await findUpcomingBroadcast({
+    await findBroadcast({
       youtube,
       profile,
       expectedStartTime:
         scheduledStartTime,
+      statuses: ["all"],
     });
 
   if (!currentBroadcast) {
     throw new Error(
-      `No upcoming broadcast was found for profile ` +
+      `No broadcast was found for profile ` +
         `${profile.id} at ${scheduledStartTime}. ` +
         "Publish mode will not create one.",
     );
