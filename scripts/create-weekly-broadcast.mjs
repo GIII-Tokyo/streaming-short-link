@@ -345,12 +345,13 @@ async function processPublish({
       expectedStartTime:
         scheduledStartTime,
       statuses: ["all"],
+      matchDateOnly: true,
     });
 
   if (!currentBroadcast) {
     throw new Error(
       `No broadcast was found for profile ` +
-        `${profile.id} at ${scheduledStartTime}. ` +
+        `${profile.id} on ${targetDate} in ${runtime.timeZone}. ` +
         "Publish mode will not create one.",
     );
   }
@@ -969,9 +970,15 @@ async function findBroadcast({
   profile,
   expectedStartTime,
   statuses,
+  matchDateOnly = false,
 }) {
   const titlePrefix =
     getTitlePrefix(profile.title);
+
+  const expectedDate = matchDateOnly
+    ? getDatePartsInTimeZone(new Date(expectedStartTime), runtime.timeZone)
+    : null;
+  const dateMatches = new Map();
 
   for (const broadcastStatus of statuses) {
     let pageToken;
@@ -991,9 +998,9 @@ async function findBroadcast({
           pageToken,
         });
 
-      const match = (
+      const matches = (
         response.data.items || []
-      ).find((item) => {
+      ).filter((item) => {
         const existingStart =
           item.snippet
             ?.scheduledStartTime;
@@ -1014,6 +1021,14 @@ async function findBroadcast({
             expectedStartTime,
           ).getTime();
 
+        const existingDate = matchDateOnly
+          ? getDatePartsInTimeZone(new Date(existingStart), runtime.timeZone)
+          : null;
+        const sameDate = matchDateOnly &&
+          existingDate.year === expectedDate.year &&
+          existingDate.month === expectedDate.month &&
+          existingDate.day === expectedDate.day;
+
         const sameProfile =
           titlePrefix === "" ||
           existingTitle.startsWith(
@@ -1021,13 +1036,17 @@ async function findBroadcast({
           );
 
         return (
-          sameTime &&
+          (matchDateOnly ? sameDate : sameTime) &&
           sameProfile
         );
       });
 
-      if (match) {
-        return match;
+      if (!matchDateOnly && matches.length > 0) {
+        return matches[0];
+      }
+
+      for (const match of matches) {
+        dateMatches.set(match.id, match);
       }
 
       pageToken =
@@ -1035,7 +1054,25 @@ async function findBroadcast({
     } while (pageToken);
   }
 
-  return null;
+  if (dateMatches.size > 1) {
+    const exactTimeMatches = [...dateMatches.values()].filter(
+      (item) => new Date(item.snippet.scheduledStartTime).getTime() ===
+        new Date(expectedStartTime).getTime(),
+    );
+
+    if (exactTimeMatches.length === 1) {
+      return exactTimeMatches[0];
+    }
+
+    throw new Error(
+      `Multiple broadcasts match profile ${profile.id} on the target date ` +
+      `in ${runtime.timeZone}: ${[...dateMatches.keys()].join(", ")}. ` +
+      `Expected start time ${expectedStartTime} matches ${exactTimeMatches.length} broadcasts. ` +
+      "Cannot choose a broadcast safely.",
+    );
+  }
+
+  return dateMatches.values().next().value || null;
 }
 
 function getTitlePrefix(
